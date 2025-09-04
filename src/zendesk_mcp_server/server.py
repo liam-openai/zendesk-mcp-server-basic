@@ -2,31 +2,44 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from cachetools.func import ttl_cache
 from dotenv import load_dotenv
 from mcp.server import InitializationOptions, NotificationOptions
 from mcp.server import Server, types
 from mcp.server.stdio import stdio_server
-from pydantic import AnyUrl
 
 from zendesk_mcp_server.zendesk_client import ZendeskClient
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 logger = logging.getLogger("zendesk-mcp-server")
-logger.info("zendesk mcp server started")
 
-load_dotenv()
-zendesk_client = ZendeskClient(
-    subdomain=os.getenv("ZENDESK_SUBDOMAIN"),
-    email=os.getenv("ZENDESK_EMAIL"),
-    token=os.getenv("ZENDESK_API_KEY")
-)
+# Lazily created client to avoid startup failures in ChatGPT Desktop
+_zendesk_client: Optional[ZendeskClient] = None
+
+
+def ensure_client() -> ZendeskClient:
+    """Return a configured ZendeskClient or raise a clear error if missing env."""
+    global _zendesk_client
+    if _zendesk_client is not None:
+        return _zendesk_client
+
+    subdomain = os.getenv("ZENDESK_SUBDOMAIN")
+    email = os.getenv("ZENDESK_EMAIL")
+    token = os.getenv("ZENDESK_API_KEY")
+    missing = [k for k, v in {
+        "ZENDESK_SUBDOMAIN": subdomain,
+        "ZENDESK_EMAIL": email,
+        "ZENDESK_API_KEY": token,
+    }.items() if not v]
+    if missing:
+        raise RuntimeError(
+            "Missing Zendesk configuration: " + ", ".join(missing) +
+            ". Set them as environment variables (e.g. via .env)."
+        )
+
+    _zendesk_client = ZendeskClient(subdomain=subdomain, email=email, token=token)
+    return _zendesk_client
 
 server = Server("Zendesk Server")
 
@@ -220,7 +233,7 @@ async def handle_call_tool(
         if name == "get_ticket":
             if not arguments:
                 raise ValueError("Missing arguments")
-            ticket = zendesk_client.get_ticket(arguments["ticket_id"])
+            ticket = ensure_client().get_ticket(arguments["ticket_id"])
             return [types.TextContent(
                 type="text",
                 text=json.dumps(ticket)
@@ -232,7 +245,7 @@ async def handle_call_tool(
             sort_by = arguments.get("sort_by", "created_at") if arguments else "created_at"
             sort_order = arguments.get("sort_order", "desc") if arguments else "desc"
 
-            tickets = zendesk_client.get_tickets(
+            tickets = ensure_client().get_tickets(
                 page=page,
                 per_page=per_page,
                 sort_by=sort_by,
@@ -246,7 +259,7 @@ async def handle_call_tool(
         elif name == "get_ticket_comments":
             if not arguments:
                 raise ValueError("Missing arguments")
-            comments = zendesk_client.get_ticket_comments(
+            comments = ensure_client().get_ticket_comments(
                 arguments["ticket_id"])
             return [types.TextContent(
                 type="text",
@@ -257,7 +270,7 @@ async def handle_call_tool(
             if not arguments:
                 raise ValueError("Missing arguments")
             public = arguments.get("public", True)
-            result = zendesk_client.post_comment(
+            result = ensure_client().post_comment(
                 ticket_id=arguments["ticket_id"],
                 comment=arguments["comment"],
                 public=public
@@ -282,7 +295,7 @@ async def handle_list_resources() -> list[types.Resource]:
     logger.debug("Handling list_resources request")
     return [
         types.Resource(
-            uri=AnyUrl("zendesk://knowledge-base"),
+            uri="zendesk://knowledge-base",
             name="Zendesk Knowledge Base",
             description="Access to Zendesk Help Center articles and sections",
             mimeType="application/json",
@@ -292,17 +305,17 @@ async def handle_list_resources() -> list[types.Resource]:
 
 @ttl_cache(ttl=3600)
 def get_cached_kb():
-    return zendesk_client.get_all_articles()
+    return ensure_client().get_all_articles()
 
 
 @server.read_resource()
-async def handle_read_resource(uri: AnyUrl) -> str:
+async def handle_read_resource(uri: str) -> str:
     logger.debug(f"Handling read_resource request for URI: {uri}")
-    if uri.scheme != "zendesk":
-        logger.error(f"Unsupported URI scheme: {uri.scheme}")
-        raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
+    if not uri.startswith("zendesk://"):
+        logger.error(f"Unsupported URI: {uri}")
+        raise ValueError(f"Unsupported URI: {uri}")
 
-    path = str(uri).replace("zendesk://", "")
+    path = uri.replace("zendesk://", "")
     if path != "knowledge-base":
         logger.error(f"Unknown resource path: {path}")
         raise ValueError(f"Unknown resource path: {path}")
@@ -322,6 +335,15 @@ async def handle_read_resource(uri: AnyUrl) -> str:
 
 
 async def main():
+    # Configure logging and load env at runtime for ChatGPT Desktop
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger.info("Zendesk MCP server starting")
+    load_dotenv()
+
     # Run the server using stdin/stdout streams
     async with stdio_server() as (read_stream, write_stream):
         await server.run(

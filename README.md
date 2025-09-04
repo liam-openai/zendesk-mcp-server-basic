@@ -45,9 +45,33 @@ This server provides a comprehensive integration with Zendesk. It offers:
 
 Analyze a Zendesk ticket and provide a detailed analysis of the ticket.
 
-### draft-ticket-respons
+### draft-ticket-response
 
 Draft a response to a Zendesk ticket.
+
+## ChatGPT Desktop
+
+To use this MCP server with ChatGPT Desktop, add an MCP server entry. Example `mcp.json` (macOS path: `~/Library/Application Support/ChatGPT/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "zendesk": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/zendesk-mcp-server",
+        "run",
+        "zendesk"
+      ]
+    }
+  }
+}
+```
+
+Notes:
+- Ensure a `.env` in the project directory with `ZENDESK_SUBDOMAIN`, `ZENDESK_EMAIL`, and `ZENDESK_API_KEY`.
+- This repo now lazy-loads credentials at tool-call time, so the server starts even if env vars are missing; tool calls will error with a clear message until configured.
 
 ## Tools
 
